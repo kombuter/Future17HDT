@@ -139,7 +139,7 @@
 </script>
 
 <main style="max-width: 820px; margin: 1.5rem auto; padding: 1rem; font-family: system-ui, sans-serif;">
-  <h1 style="margin-bottom: 0.25rem;">Syntropic Guild Builder (Offline)</h1>
+  <h1 style="margin-bottom: 0.25rem;">Syntropic Guild Builder </h1>
 
   <!-- Stepper -->
   <div style="display: flex; gap: 0.5rem; margin: 1rem 0 1.5rem;">

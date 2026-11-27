@@ -1,15 +1,15 @@
 // horta-app/src/lib/recommender.ts
-import seedData from './data/seed.json'; // <-- adjust path if your file is ./data.json
+import seedData from './data/seed.json';
 
 export type LayerId = 'emergent' | 'canopy' | 'mid' | 'lower_mid' | 'ground';
 
 export interface SiteInput {
-  tempC?: number;          // e.g. 26
-  rainMm?: number;         // e.g. 2200
-  soilPh?: number;         // e.g. 5.5
+  tempC?: number;
+  rainMm?: number;
+  soilPh?: number;
   drainage?: 'well_drained' | 'wet' | 'any';
   preferPancs?: boolean;
-  primaryCashCropId?: string; // e.g. 'SP-0019' (Açaí) or 'SP-0013' (Banana)
+  primaryCashCropId?: string;
 }
 
 export interface Species {
@@ -45,6 +45,7 @@ export interface ScoredSpecies {
   reasons: string[];
   penalties: string[];
   isCompanionMatch: boolean;
+  isAntagonistMatch: boolean;
 }
 
 export interface GuildResult {
@@ -58,14 +59,66 @@ const LAYERS_ORDER: LayerId[] = ['emergent', 'canopy', 'mid', 'lower_mid', 'grou
 const allSpecies = (seedData.species as Species[]).filter(
   (sp) => Boolean(sp.scientific_name) && (sp.opt_temp_min !== null || sp.soil_ph_min !== null)
 );
+
 const allRelations = seedData.relations as Array<{
   species_a_id: string;
+  species_b_id: string | null;
   species_b_label: string;
   relation_type: string;
 }>;
 
-// Helper: check if a value falls in [optMin, optMax] or [absMin, absMax]
-// Helper: score value against [optMin, optMax] and [absMin, absMax] without hiding the plant
+const ALIASES: Record<string, string[]> = {
+  cacau: ['cacau', 'cacao', 'cocoa'],
+  mandioca: ['mandioca', 'macaxeira', 'cassava'],
+  pimenta: ['pimenta', 'black pepper', 'pepper'],
+  castanha: ['castanha', 'brazil nut', 'castanha-do-pará'],
+  ingá: ['inga', 'ingá'],
+  açaí: ['acai', 'açaí'],
+  cupuaçu: ['cupuacu', 'cupuaçu'],
+  batata: ['batata-ariá', 'batata aria', 'ariá', 'aria'],
+};
+
+function getSearchTerms(sp: Species): string[] {
+  const base = sp.common_name_pt.toLowerCase().split(/[\s-(/]/)[0];
+  return ALIASES[base] ?? (base.length > 3 ? [base] : []);
+}
+
+function getRelationStatus(
+  spA: Species,
+  spB: Species
+): { isCompanion: boolean; isAntagonist: boolean; avoidNote?: string } {
+  if (spA.id === spB.id) return { isCompanion: false, isAntagonist: false };
+
+  const relsA = allRelations.filter((r) => r.species_a_id === spA.id);
+  const relsB = allRelations.filter((r) => r.species_a_id === spB.id);
+  const termsA = getSearchTerms(spA);
+  const termsB = getSearchTerms(spB);
+
+  const matchingRels = [
+    ...relsA.filter(
+      (r) =>
+        r.species_b_id === spB.id ||
+        termsB.some((t) => r.species_b_label.toLowerCase().includes(t))
+    ),
+    ...relsB.filter(
+      (r) =>
+        r.species_b_id === spA.id ||
+        termsA.some((t) => r.species_b_label.toLowerCase().includes(t))
+    ),
+  ];
+
+  if (matchingRels.length === 0) {
+    return { isCompanion: false, isAntagonist: false };
+  }
+
+  const avoidRel = matchingRels.find((r) => r.species_b_label.toLowerCase().includes('avoid'));
+  if (avoidRel) {
+    return { isCompanion: false, isAntagonist: true, avoidNote: avoidRel.species_b_label };
+  }
+
+  return { isCompanion: true, isAntagonist: false };
+}
+
 function rangeScore(
   label: string,
   val: number | undefined,
@@ -76,7 +129,7 @@ function rangeScore(
   softLow = 1,
   softHigh = 1
 ): { pts: number; penalty?: string } {
-  if (val === undefined || (optMin === null && optMax === null)) return { pts: 5 };
+  if (val === undefined || (optMin === null && optMax === null)) return { pts: 10 };
   if (optMin !== null && optMax !== null && val >= optMin && val <= optMax) return { pts: 20 };
 
   const effAbsMin = absMin ?? (optMin !== null ? optMin - softLow : null);
@@ -85,16 +138,15 @@ function rangeScore(
   if (effAbsMin !== null && effAbsMax !== null && val >= effAbsMin && val <= effAbsMax) {
     return {
       pts: 10,
-      penalty: `${label} outside optimal (${val}; ideal is ${optMin ?? '?'}–${optMax ?? '?'}, tolerated ${effAbsMin}–${effAbsMax}) [−10 pts]`,
+      penalty: `${label} outside optimal (${val}; ideal ${optMin ?? '?'}–${optMax ?? '?'}, tolerated ${effAbsMin}–${effAbsMax}) [+10 of 20 pts]`,
     };
   }
 
   return {
-    pts: -25,
-    penalty: `${label} out of range (${val}; optimal ${optMin ?? '?'}–${optMax ?? '?'}, max tolerance ${effAbsMin ?? '?'}–${effAbsMax ?? '?'}) [−25 pts]`,
+    pts: -15,
+    penalty: `${label} out of range (${val}; optimal ${optMin ?? '?'}–${optMax ?? '?'}, max tolerance ${effAbsMin ?? '?'}–${effAbsMax ?? '?'}) [−15 pts]`,
   };
 }
-
 
 function isSoilHealer(sp: Species): boolean {
   const role = (sp.role_in_system || '').toLowerCase();
@@ -105,33 +157,30 @@ function isCashCrop(sp: Species): boolean {
   return (sp.role_in_system || '').toLowerCase().includes('cash crop');
 }
 
-/**
- * 1. Score and rank all compatible species for a given site & optional anchor crop.
- */
 export function rankSpeciesForSite(site: SiteInput): ScoredSpecies[] {
   const anchorSp = site.primaryCashCropId
     ? allSpecies.find((s) => s.id === site.primaryCashCropId)
     : undefined;
-  const anchorKey = anchorSp ? anchorSp.common_name_pt.toLowerCase().split(/[\s-(]/)[0] : '';
-  const anchorText = site.primaryCashCropId
-    ? allRelations
-        .filter((r) => r.species_a_id === site.primaryCashCropId)
-        .map((r) => r.species_b_label.toLowerCase())
-        .join(' ')
-    : '';
 
   const results: ScoredSpecies[] = [];
 
   for (const sp of allSpecies) {
     const reasons: string[] = [];
     const penalties: string[] = [];
-    let score = 0;
+    let rawScore = 0;
 
-    // Drainage check (penalty + reason instead of hiding)
-    // Drainage check
-    if (site.drainage === 'wet' && sp.drainage_requirement === 'strictly_well_drained') {
-      score -= 30;
-      penalties.push('Drainage mismatch: requires well-drained soil, site is Wet/Várzea [−30 pts]');
+    // Drainage check (Wet / Várzea sites)
+    if (site.drainage === 'wet') {
+      if (sp.drainage_requirement === 'tolerates_wet_soils') {
+        rawScore += 10;
+        reasons.push('Thrives in wet / floodplain soils (+10 pts)');
+      } else if (sp.drainage_requirement === 'strictly_well_drained') {
+        rawScore -= 20;
+        penalties.push('Strictly requires well-drained soil; high root-rot risk on Wet/Várzea sites [−20 pts]');
+      } else if (sp.drainage_requirement === 'well_drained') {
+        rawScore -= 15;
+        penalties.push('Prefers well-drained soil — use raised beds/mounds on Wet/Várzea sites [−15 pts]');
+      }
     }
 
     // Climate & soil checks
@@ -139,55 +188,49 @@ export function rankSpeciesForSite(site: SiteInput): ScoredSpecies[] {
     const r = rangeScore('Rain', site.rainMm, sp.opt_rain_min, sp.opt_rain_max, sp.abs_rain_min, sp.abs_rain_max, 500, 1200);
     const p = rangeScore('pH', site.soilPh, sp.soil_ph_min, sp.soil_ph_max, sp.abs_ph_min, sp.abs_ph_max, 1, 1);
 
-    score += t.pts + r.pts + p.pts;
+    rawScore += t.pts + r.pts + p.pts;
     if (t.penalty) penalties.push(t.penalty);
     if (r.penalty) penalties.push(r.penalty);
     if (p.penalty) penalties.push(p.penalty);
 
+    // Agroforestry bonuses
     if (site.preferPancs && sp.is_panc === 1) {
-      score += 12;
+      rawScore += 12;
       reasons.push('PANC (+12 pts)');
     }
     if (isSoilHealer(sp)) {
-      score += 10;
+      rawScore += 10;
       reasons.push('Soil healer: N-fixer / Biomass (+10 pts)');
     }
 
-    const nameKey = sp.common_name_pt.toLowerCase().split(/[\s-(]/)[0];
-    const spText = site.primaryCashCropId
-      ? allRelations
-          .filter((r) => r.species_a_id === sp.id)
-          .map((r) => r.species_b_label.toLowerCase())
-          .join(' ')
-      : '';
+    // Companion vs. Antagonist check against primary anchor crop
+    let isCompanionMatch = false;
+    let isAntagonistMatch = false;
+    if (anchorSp && sp.id !== anchorSp.id) {
+      const rel = getRelationStatus(anchorSp, sp);
+      isCompanionMatch = rel.isCompanion;
+      isAntagonistMatch = rel.isAntagonist;
 
-    const isCompanionMatch = Boolean(
-      site.primaryCashCropId &&
-        sp.id !== site.primaryCashCropId &&
-        ((nameKey.length > 3 && anchorText.includes(nameKey)) ||
-          (anchorKey.length > 3 && spText.includes(anchorKey)))
-    );
-    if (isCompanionMatch) {
-      score += 15;
-      reasons.push('Recommended companion (+15 pts)');
+      if (isAntagonistMatch) {
+        rawScore -= 20;
+        penalties.push(`Avoid pairing with ${anchorSp.common_name_pt}: ${rel.avoidNote} [−20 pts]`);
+      } else if (isCompanionMatch) {
+        rawScore += 15;
+        reasons.push(`Recommended companion for ${anchorSp.common_name_pt} (+15 pts)`);
+      }
     }
 
-    results.push({ species: sp, score, reasons, penalties, isCompanionMatch });
+    const score = Math.max(0, Math.min(100, rawScore));
+    results.push({ species: sp, score, reasons, penalties, isCompanionMatch, isAntagonistMatch });
   }
 
   return results.sort((a, b) => b.score - a.score);
 }
 
-/**
- * 2. Get compatible dropdown options for a single stratum slot (for interactive swapping).
- */
 export function getOptionsForLayer(layer: LayerId, site: SiteInput): ScoredSpecies[] {
   return rankSpeciesForSite(site).filter((item) => item.species.layer_id === layer);
 }
 
-/**
- * 3. Auto-build a balanced 5-layer syntropic guild.
- */
 export function buildRecommendedGuild(
   site: SiteInput,
   activeLayers: LayerId[] = LAYERS_ORDER
@@ -201,26 +244,28 @@ export function buildRecommendedGuild(
     ground: null,
   };
 
-  // Lock in primary cash crop if the user selected one
   if (site.primaryCashCropId) {
     const anchor = ranked.find((x) => x.species.id === site.primaryCashCropId);
     if (anchor) slots[anchor.species.layer_id] = anchor;
   }
 
-  // Fill only the active layers with top-scoring species
   for (const layer of activeLayers) {
     if (!slots[layer]) {
-      slots[layer] = ranked.find((x) => x.species.layer_id === layer) ?? null;
+      // Avoid auto-picking an antagonist if a safe alternative exists
+      slots[layer] =
+        ranked.find((x) => x.species.layer_id === layer && !x.isAntagonistMatch) ??
+        ranked.find((x) => x.species.layer_id === layer) ??
+        null;
     }
   }
 
-  // Ensure at least 1 nitrogen-fixer / biomass species is in the active layers
   const chosen = Object.values(slots).filter(Boolean) as ScoredSpecies[];
   if (!chosen.some((c) => isSoilHealer(c.species))) {
     const healer = ranked.find(
       (x) =>
         activeLayers.includes(x.species.layer_id) &&
         isSoilHealer(x.species) &&
+        !x.isAntagonistMatch &&
         x.species.id !== site.primaryCashCropId
     );
     if (healer) slots[healer.species.layer_id] = healer;
@@ -229,13 +274,11 @@ export function buildRecommendedGuild(
   return evaluateGuild(slots);
 }
 
-/**
- * 4. Validate any user-edited guild + generate the simple row-spacing blueprint.
- */
 export function evaluateGuild(slots: Record<LayerId, ScoredSpecies | null>): GuildResult {
   const chosen = Object.values(slots).filter(Boolean) as ScoredSpecies[];
   const warnings: string[] = [];
 
+  // 1. Core functional checks
   if (!chosen.some((c) => isSoilHealer(c.species))) {
     warnings.push('No nitrogen-fixer or heavy biomass plant selected — add Ingá-cipó, Gliricidia, or Banana to restore soil.');
   }
@@ -244,6 +287,59 @@ export function evaluateGuild(slots: Record<LayerId, ScoredSpecies | null>): Gui
   }
   if (!chosen.some((c) => c.species.is_panc === 1)) {
     warnings.push('No PANC species included — add a ground or lower-mid PANC (e.g., Jambu, Cariru, Taioba).');
+  }
+
+  // 2. Antagonist pair check across all selected slots
+  for (let i = 0; i < chosen.length; i++) {
+    for (let j = i + 1; j < chosen.length; j++) {
+      const a = chosen[i].species;
+      const b = chosen[j].species;
+      const rel = getRelationStatus(a, b);
+      if (rel.isAntagonist) {
+        warnings.push(`Avoid planting ${a.common_name_pt} next to ${b.common_name_pt} (${rel.avoidNote}).`);
+      }
+    }
+  }
+
+  // 3. Shade / canopy mismatch check
+  const hasUpperCanopy = Boolean(slots.emergent || slots.canopy);
+  const hasAnyShadeAboveGround = Boolean(slots.emergent || slots.canopy || slots.mid);
+
+  const exposedShadeLovers: ScoredSpecies[] = [];
+  if (!hasUpperCanopy && slots.mid && (slots.mid.species.shade_tolerance || '').toLowerCase() === 'partial shade') {
+    exposedShadeLovers.push(slots.mid);
+  }
+  if (!hasAnyShadeAboveGround) {
+    for (const s of [slots.lower_mid, slots.ground]) {
+      if (s && (s.species.shade_tolerance || '').toLowerCase() === 'partial shade') {
+        exposedShadeLovers.push(s);
+      }
+    }
+  }
+  if (exposedShadeLovers.length > 0) {
+    warnings.push(
+      `No shade layer above partial-shade crops (${exposedShadeLovers.map((s) => s.species.common_name_pt).join(', ')}).`
+    );
+  }
+
+  if (hasUpperCanopy) {
+    const sunLovers = [slots.lower_mid, slots.ground]
+      .filter(Boolean)
+      .filter((c) => (c!.species.shade_tolerance || '').toLowerCase() === 'full sun') as ScoredSpecies[];
+    if (sunLovers.length > 0) {
+      warnings.push(
+        `${sunLovers.map((s) => s.species.common_name_pt).join(', ')} prefer Full Sun — plant in sunny alley edges or prune the upper canopy regularly.`
+      );
+    }
+  }
+
+  // 4. Succession balance check
+  const stages = chosen.map((c) => (c.species.succession_stage || '').toLowerCase());
+  if (!stages.some((s) => s.includes('placenta'))) {
+    warnings.push('No Placenta (0–2 yr) species selected — add a fast ground/lower-mid crop for Year 1 soil cover and early harvest.');
+  }
+  if (!stages.some((s) => s.includes('secondary') || s.includes('climax'))) {
+    warnings.push('No Secondary or Climax species selected — add mid/canopy trees for long-term structure and income.');
   }
 
   const name = (l: LayerId) => slots[l]?.species.common_name_pt ?? '—';
