@@ -39,9 +39,19 @@ export interface Species {
   harvest_notes_pt: string | null;
 }
 
+export interface MetricCheck {
+  label: string;
+  range: string;
+  siteVal: string;
+  status: 'optimal' | 'tolerated' | 'out' | 'missing';
+  statusLabel: string;
+  pts: number;
+}
+
 export interface ScoredSpecies {
   species: Species;
   score: number;
+  metrics: MetricCheck[];
   reasons: string[];
   penalties: string[];
   isCompanionMatch: boolean;
@@ -86,37 +96,76 @@ function getSearchTerms(sp: Species): string[] {
 function getRelationStatus(
   spA: Species,
   spB: Species
-): { isCompanion: boolean; isAntagonist: boolean; avoidNote?: string } {
-  if (spA.id === spB.id) return { isCompanion: false, isAntagonist: false };
-
-  const relsA = allRelations.filter((r) => r.species_a_id === spA.id);
-  const relsB = allRelations.filter((r) => r.species_a_id === spB.id);
-  const termsA = getSearchTerms(spA);
-  const termsB = getSearchTerms(spB);
-
-  const matchingRels = [
-    ...relsA.filter(
-      (r) =>
-        r.species_b_id === spB.id ||
-        termsB.some((t) => r.species_b_label.toLowerCase().includes(t))
-    ),
-    ...relsB.filter(
-      (r) =>
-        r.species_b_id === spA.id ||
-        termsA.some((t) => r.species_b_label.toLowerCase().includes(t))
-    ),
-  ];
-
-  if (matchingRels.length === 0) {
+): {
+  isCompanion: boolean;
+  isAntagonist: boolean;
+  avoidNote?: string;
+} {
+  if (spA.id === spB.id) {
     return { isCompanion: false, isAntagonist: false };
   }
 
-  const avoidRel = matchingRels.find((r) => r.species_b_label.toLowerCase().includes('avoid'));
-  if (avoidRel) {
-    return { isCompanion: false, isAntagonist: true, avoidNote: avoidRel.species_b_label };
+  // Ignore accents, capitalization, and punctuation when matching names.
+  const normalize = (text: string) =>
+    text
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+
+  let isCompanion = false;
+
+  for (const [source, target] of [
+    [spA, spB],
+    [spB, spA],
+  ]) {
+    const terms = [
+      ...getSearchTerms(target),
+      target.common_name_pt,
+      target.scientific_name ?? '',
+    ]
+      .map(normalize)
+      .filter(Boolean);
+
+    const mentionsTarget = (text: string) => {
+      const normalized = ` ${normalize(text)} `;
+      return terms.some((term) => normalized.includes(` ${term} `));
+    };
+
+    const relations = allRelations.filter((r) => r.species_a_id === source.id);
+
+    for (const r of relations) {
+      const label = r.species_b_label;
+      const avoidMatch = /\bavoid\b/i.exec(label);
+
+      if (avoidMatch) {
+        const beforeAvoid = label.slice(0, avoidMatch.index);
+
+        // Only names in the clause after "avoid" count as antagonists.
+        const afterAvoid = label
+          .slice(avoidMatch.index + avoidMatch[0].length)
+          .split(/[.!?;\n]/)[0];
+
+        if (mentionsTarget(afterAvoid)) {
+          return {
+            isCompanion: false,
+            isAntagonist: true,
+            avoidNote: label,
+          };
+        }
+
+        // Mixed rows must mention the companion before "avoid".
+        if (mentionsTarget(beforeAvoid)) {
+          isCompanion = true;
+        }
+      } else if (r.species_b_id === target.id || mentionsTarget(label)) {
+        isCompanion = true;
+      }
+    }
   }
 
-  return { isCompanion: true, isAntagonist: false };
+  return { isCompanion, isAntagonist: false };
 }
 
 function rangeScore(
@@ -127,25 +176,29 @@ function rangeScore(
   absMin: number | null,
   absMax: number | null,
   softLow = 1,
-  softHigh = 1
-): { pts: number; penalty?: string } {
-  if (val === undefined || (optMin === null && optMax === null)) return { pts: 10 };
-  if (optMin !== null && optMax !== null && val >= optMin && val <= optMax) return { pts: 20 };
+  softHigh = 1,
+  unit = ''
+): MetricCheck {
+  const fmt = (n: number) => (label === 'Rain' ? n.toLocaleString('en-US') : String(n));
+  const range =
+    optMin !== null && optMax !== null ? `${fmt(optMin)}–${fmt(optMax)}${unit}` : '—';
+  const siteVal = val !== undefined ? `${fmt(val)}${unit}` : '—';
+
+  if (val === undefined || (optMin === null && optMax === null)) {
+    return { label, range, siteVal, status: 'missing', statusLabel: 'No data', pts: 15 };
+  }
+  if (optMin !== null && optMax !== null && val >= optMin && val <= optMax) {
+    return { label, range, siteVal, status: 'optimal', statusLabel: 'Optimal', pts: 25 };
+  }
 
   const effAbsMin = absMin ?? (optMin !== null ? optMin - softLow : null);
   const effAbsMax = absMax ?? (optMax !== null ? optMax + softHigh : null);
 
   if (effAbsMin !== null && effAbsMax !== null && val >= effAbsMin && val <= effAbsMax) {
-    return {
-      pts: 10,
-      penalty: `${label} outside optimal (${val}; ideal ${optMin ?? '?'}–${optMax ?? '?'}, tolerated ${effAbsMin}–${effAbsMax}) [+10 of 20 pts]`,
-    };
+    return { label, range, siteVal, status: 'tolerated', statusLabel: 'Within tolerance', pts: 15 };
   }
 
-  return {
-    pts: -15,
-    penalty: `${label} out of range (${val}; optimal ${optMin ?? '?'}–${optMax ?? '?'}, max tolerance ${effAbsMin ?? '?'}–${effAbsMax ?? '?'}) [−15 pts]`,
-  };
+  return { label, range, siteVal, status: 'out', statusLabel: 'Outside tolerance', pts: -15 };
 }
 
 function isSoilHealer(sp: Species): boolean {
@@ -178,25 +231,23 @@ export function rankSpeciesForSite(site: SiteInput): ScoredSpecies[] {
         rawScore -= 20;
         penalties.push('Strictly requires well-drained soil; high root-rot risk on Wet/Várzea sites [−20 pts]');
       } else if (sp.drainage_requirement === 'well_drained') {
-        rawScore -= 15;
-        penalties.push('Prefers well-drained soil — use raised beds/mounds on Wet/Várzea sites [−15 pts]');
+        rawScore -= 5;
+        penalties.push('Prefers well-drained soil — use raised beds/mounds on Wet/Várzea sites [−5 pts]');
       }
     }
 
     // Climate & soil checks
-    const t = rangeScore('Temp', site.tempC, sp.opt_temp_min, sp.opt_temp_max, sp.abs_temp_min, sp.abs_temp_max, 7, 6);
-    const r = rangeScore('Rain', site.rainMm, sp.opt_rain_min, sp.opt_rain_max, sp.abs_rain_min, sp.abs_rain_max, 500, 1200);
     const p = rangeScore('pH', site.soilPh, sp.soil_ph_min, sp.soil_ph_max, sp.abs_ph_min, sp.abs_ph_max, 1, 1);
+    const r = rangeScore('Rain', site.rainMm, sp.opt_rain_min, sp.opt_rain_max, sp.abs_rain_min, sp.abs_rain_max, 500, 1200, ' mm');
+    const t = rangeScore('Temperature', site.tempC, sp.opt_temp_min, sp.opt_temp_max, sp.abs_temp_min, sp.abs_temp_max, 7, 6, '°C');
 
-    rawScore += t.pts + r.pts + p.pts;
-    if (t.penalty) penalties.push(t.penalty);
-    if (r.penalty) penalties.push(r.penalty);
-    if (p.penalty) penalties.push(p.penalty);
+    rawScore += p.pts + r.pts + t.pts;
+    const metrics = [p, r, t];
 
     // Agroforestry bonuses
     if (site.preferPancs && sp.is_panc === 1) {
-      rawScore += 12;
-      reasons.push('PANC (+12 pts)');
+      rawScore += 5;
+      reasons.push('PANC (+5 pts)');
     }
     if (isSoilHealer(sp)) {
       rawScore += 10;
@@ -215,13 +266,13 @@ export function rankSpeciesForSite(site: SiteInput): ScoredSpecies[] {
         rawScore -= 20;
         penalties.push(`Avoid pairing with ${anchorSp.common_name_pt}: ${rel.avoidNote} [−20 pts]`);
       } else if (isCompanionMatch) {
-        rawScore += 15;
-        reasons.push(`Recommended companion for ${anchorSp.common_name_pt} (+15 pts)`);
+        rawScore += 10;
+        reasons.push(`Recommended companion for ${anchorSp.common_name_pt} (+10 pts)`);
       }
     }
 
     const score = Math.max(0, Math.min(100, rawScore));
-    results.push({ species: sp, score, reasons, penalties, isCompanionMatch, isAntagonistMatch });
+    results.push({ species: sp, score, metrics, reasons, penalties, isCompanionMatch, isAntagonistMatch });
   }
 
   return results.sort((a, b) => b.score - a.score);

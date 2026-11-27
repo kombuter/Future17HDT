@@ -139,7 +139,7 @@
 </script>
 
 <main style="max-width: 820px; margin: 1.5rem auto; padding: 1rem; font-family: system-ui, sans-serif;">
-  <h1 style="margin-bottom: 0.25rem;">Syntropic Guild Builder </h1>
+  <h1 style="margin-bottom: 0.25rem;">Syntropic Guild Builder</h1>
 
   <!-- Stepper -->
   <div style="display: flex; gap: 0.5rem; margin: 1rem 0 1.5rem;">
@@ -241,7 +241,6 @@
           {/each}
         </div>
 
-        
         <!-- Selected Plant Info Card -->
         {#if inspectedPlant}
           {@const sp = inspectedPlant.species}
@@ -260,26 +259,29 @@
               <div><strong>Harvest:</strong> {sp.harvest_notes_en ?? sp.harvest_notes_pt ?? '—'}</div>
               <div><strong>Layout / Spacing:</strong> {sp.layout_notes ?? '—'}</div>
               <div><strong>Shade Tolerance:</strong> {sp.shade_tolerance ?? '—'}</div>
-              <div><strong>Optimal pH:</strong> {sp.soil_ph_min ?? '?'} – {sp.soil_ph_max ?? '?'}</div>
-              <div><strong>Optimal Rain:</strong> {sp.opt_rain_min ?? '?'} – {sp.opt_rain_max ?? '?'} mm/yr</div>
-              <!-- Red Penalty Breakdown -->
-            {#if inspectedPlant.penalties?.length > 0}
-              <div style="background: #ffebee; border: 1px solid #ef9a9a; border-left: 4px solid #c62828; color: #b71c1c; padding: 0.6rem 0.75rem; border-radius: 6px; margin-bottom: 0.85rem; font-size: 0.85rem;">
-                <strong style="display: block; margin-bottom: 0.2rem;">Why points were deducted here:</strong>
-                <ul style="margin: 0; padding-left: 1.2rem;">
-                  {#each inspectedPlant.penalties as pen}
-                    <li>{pen}</li>
-                  {/each}
-                </ul>
-              </div>
-            {/if}
 
-            <!-- Green Bonus Breakdown -->
-            {#if inspectedPlant.reasons?.length > 0}
-              <div style="background: #e8f5e9; border: 1px solid #a5d6a7; color: #1b5e20; padding: 0.5rem 0.75rem; border-radius: 6px; margin-bottom: 0.85rem; font-size: 0.83rem;">
-                <strong>Site bonuses:</strong> {inspectedPlant.reasons.join(' • ')}
-              </div>
-            {/if}
+              {#each inspectedPlant.metrics as m}
+                {@const color = m.status === 'optimal' ? '#1b5e20' : m.status === 'out' ? '#c62828' : '#b26a00'}
+                <div>
+                  <strong>{m.label}:</strong> Optimal {m.range} · Site {m.siteVal} →
+                  <span style="color: {color}; font-weight: 600;">
+                    {m.statusLabel} {m.pts > 0 ? `+${m.pts}` : `−${Math.abs(m.pts)}`}
+                  </span>
+                </div>
+              {/each}
+
+              {#if inspectedPlant.penalties?.length > 0}
+  <div style="background: #ffebee; border: 1px solid #ef9a9a; color: #b71c1c; padding: 0.5rem 0.75rem; border-radius: 6px; margin-top: 0.25rem; font-size: 0.83rem;">
+    {inspectedPlant.penalties.join(' • ')}
+  </div>
+{/if}
+
+              <!-- Green Bonus Breakdown -->
+              {#if inspectedPlant.reasons?.length > 0}
+                <div style="background: #e8f5e9; border: 1px solid #a5d6a7; color: #1b5e20; padding: 0.5rem 0.75rem; border-radius: 6px; margin-top: 0.25rem; font-size: 0.83rem;">
+                  <strong>Site bonuses:</strong> {inspectedPlant.reasons.join(' • ')}
+                </div>
+              {/if}
             </div>
 
             <button
